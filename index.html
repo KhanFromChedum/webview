@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lecteur DataMatrix</title>
+<style>
+  :root {
+    --bg: #0e0e10;
+    --fg: #f5f5f7;
+    --accent: #34c759;
+    --error: #ff3b30;
+    --muted: #8e8e93;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    height: 100%; overflow: hidden;
+  }
+  #app {
+    display: flex; flex-direction: column;
+    height: 100vh; height: 100dvh;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  header {
+    padding: 12px 16px;
+    display: flex; align-items: center; justify-content: space-between;
+    background: rgba(0,0,0,0.4);
+    z-index: 2;
+  }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  #status { font-size: 13px; color: var(--muted); }
+  #status.ok { color: var(--accent); }
+  #status.err { color: var(--error); }
+
+  #videoWrap {
+    position: relative; flex: 1;
+    background: #000; overflow: hidden;
+  }
+  #video {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  #overlay {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    pointer-events: none;
+  }
+  #frame {
+    width: 70vmin; height: 70vmin;
+    max-width: 320px; max-height: 320px;
+    border: 2px solid rgba(255,255,255,0.7);
+    border-radius: 12px;
+    box-shadow: 0 0 0 9999px rgba(0,0,0,0.35);
+  }
+  #frame.hit { border-color: var(--accent); box-shadow: 0 0 0 9999px rgba(0,0,0,0.15), 0 0 30px var(--accent); }
+
+  footer {
+    padding: 14px 16px;
+    background: rgba(0,0,0,0.5);
+    display: flex; flex-direction: column; gap: 10px;
+    z-index: 2;
+  }
+  .row { display: flex; gap: 10px; }
+  button {
+    flex: 1;
+    background: #1c1c1e; color: var(--fg);
+    border: 1px solid #2c2c2e;
+    padding: 12px; border-radius: 10px;
+    font-size: 15px; font-weight: 500;
+    cursor: pointer;
+  }
+  button.primary { background: var(--accent); color: #000; border-color: var(--accent); }
+  button:disabled { opacity: 0.4; }
+
+  #result {
+    background: #1c1c1e; border-radius: 10px;
+    padding: 12px; font-family: ui-monospace, Menlo, monospace;
+    font-size: 13px; word-break: break-all;
+    max-height: 30vh; overflow-y: auto;
+    min-height: 44px;
+    display: flex; align-items: center;
+    color: var(--muted);
+  }
+  #result.has-value { color: var(--fg); }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Lecteur DataMatrix</h1>
+    <span id="status">Prêt</span>
+  </header>
+
+  <div id="videoWrap">
+    <video id="video" playsinline autoplay muted></video>
+    <div id="overlay"><div id="frame"></div></div>
+  </div>
+
+  <footer>
+    <div id="result">En attente de scan…</div>
+    <div class="row">
+      <button id="startBtn" class="primary">Démarrer</button>
+      <button id="stopBtn" disabled>Arrêter</button>
+      <button id="copyBtn" disabled>Copier</button>
+    </div>
+  </footer>
+</div>
+
+<script type="module">
+import { BrowserMultiFormatReader } from 'https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/+esm';
+import { DecodeHintType, BarcodeFormat } from 'https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/+esm';
+
+const video    = document.getElementById('video');
+const status   = document.getElementById('status');
+const result   = document.getElementById('result');
+const frame    = document.getElementById('frame');
+const startBtn = document.getElementById('startBtn');
+const stopBtn  = document.getElementById('stopBtn');
+const copyBtn  = document.getElementById('copyBtn');
+
+const hints = new Map();
+hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.DATA_MATRIX]);
+hints.set(DecodeHintType.TRY_HARDER, true);
+
+const reader = new BrowserMultiFormatReader(hints, { delayBetweenScanAttempts: 120 });
+let controls = null;
+let lastValue = '';
+
+function setStatus(text, cls = '') {
+  status.textContent = text;
+  status.className = cls;
+}
+
+async function start() {
+  try {
+    setStatus('Ouverture caméra…');
+    startBtn.disabled = true;
+
+    // Force la caméra arrière avec haute résolution — meilleur pour les DataMatrix denses
+    const constraints = {
+      video: {
+        facingMode: { ideal: 'environment' },
+        width:  { ideal: 1920 },
+        height: { ideal: 1080 }
+      },
+      audio: false
+    };
+
+    controls = await reader.decodeFromConstraints(constraints, video, (res, err) => {
+      if (res) onDecoded(res.getText());
+    });
+
+    setStatus('Scan en cours…', 'ok');
+    stopBtn.disabled = false;
+
+    // Tentative d'activation de la mise au point continue (WebKit)
+    try {
+      const track = video.srcObject.getVideoTracks()[0];
+      const caps = track.getCapabilities?.() || {};
+      const advanced = [];
+      if (caps.focusMode?.includes('continuous')) advanced.push({ focusMode: 'continuous' });
+      if (advanced.length) await track.applyConstraints({ advanced });
+    } catch {}
+  } catch (e) {
+    console.error(e);
+    setStatus('Erreur: ' + (e.message || e.name), 'err');
+    startBtn.disabled = false;
+  }
+}
+
+function stop() {
+  if (controls) { controls.stop(); controls = null; }
+  setStatus('Arrêté');
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+}
+
+function onDecoded(text) {
+  if (text === lastValue) return;
+  lastValue = text;
+  result.textContent = text;
+  result.classList.add('has-value');
+  copyBtn.disabled = false;
+  frame.classList.add('hit');
+  setStatus('Code lu ✓', 'ok');
+  if (navigator.vibrate) navigator.vibrate(80);
+  setTimeout(() => frame.classList.remove('hit'), 500);
+}
+
+async function copyResult() {
+  if (!lastValue) return;
+  try {
+    await navigator.clipboard.writeText(lastValue);
+    setStatus('Copié dans le presse-papiers', 'ok');
+  } catch {
+    setStatus('Copie impossible', 'err');
+  }
+}
+
+startBtn.addEventListener('click', start);
+stopBtn.addEventListener('click', stop);
+copyBtn.addEventListener('click', copyResult);
+
+// Vérif contexte sécurisé (Safari refuse la caméra en HTTP)
+if (!window.isSecureContext) {
+  setStatus('HTTPS requis pour la caméra', 'err');
+  startBtn.disabled = true;
+}
+</script>
+</body>
+</html>
