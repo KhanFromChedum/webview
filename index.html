@@ -135,41 +135,80 @@ function setStatus(text, cls = '') {
   status.className = cls;
 }
 
-async function start() {
-  try {
-    setStatus('Ouverture caméra…');
-    startBtn.disabled = true;
+function diagnose() {
+  const d = [];
+  d.push('secure=' + window.isSecureContext);
+  d.push('mediaDevices=' + !!navigator.mediaDevices);
+  d.push('gUM=' + !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia));
+  d.push('inFrame=' + (window.top !== window.self));
+  return d.join(' | ');
+}
 
-    // Force la caméra arrière avec haute résolution — meilleur pour les DataMatrix denses
-    const constraints = {
-      video: {
-        facingMode: { ideal: 'environment' },
-        width:  { ideal: 1920 },
-        height: { ideal: 1080 }
-      },
-      audio: false
-    };
-
-    controls = await reader.decodeFromConstraints(constraints, video, (res, err) => {
-      if (res) onDecoded(res.getText());
-    });
-
-    setStatus('Scan en cours…', 'ok');
-    stopBtn.disabled = false;
-
-    // Tentative d'activation de la mise au point continue (WebKit)
-    try {
-      const track = video.srcObject.getVideoTracks()[0];
-      const caps = track.getCapabilities?.() || {};
-      const advanced = [];
-      if (caps.focusMode?.includes('continuous')) advanced.push({ focusMode: 'continuous' });
-      if (advanced.length) await track.applyConstraints({ advanced });
-    } catch {}
-  } catch (e) {
-    console.error(e);
-    setStatus('Erreur: ' + (e.message || e.name), 'err');
-    startBtn.disabled = false;
+function explainError(e) {
+  const n = e.name || '';
+  if (n === 'NotAllowedError' || n === 'SecurityError') {
+    return "Accès caméra refusé. Vérifie les autorisations du site (cadenas dans l'URL → Caméra → Autoriser) puis recharge la page.";
   }
+  if (n === 'NotFoundError' || n === 'OverconstrainedError') {
+    return "Aucune caméra compatible avec les contraintes demandées.";
+  }
+  if (n === 'NotReadableError') {
+    return "Caméra occupée par une autre application. Ferme-la et réessaie.";
+  }
+  return (e.message || n || 'Erreur inconnue');
+}
+
+async function start() {
+  startBtn.disabled = true;
+
+  // Diagnostic préalable — si pas de mediaDevices, inutile d'aller plus loin
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setStatus('API caméra indisponible (' + diagnose() + ')', 'err');
+    startBtn.disabled = false;
+    return;
+  }
+  if (window.top !== window.self) {
+    setStatus("Page dans une iframe — la caméra sera refusée. Ouvre l'URL directement.", 'err');
+    startBtn.disabled = false;
+    return;
+  }
+
+  // Deux jeux de contraintes : HD d'abord, puis fallback minimal si refus
+  const constraintSets = [
+    { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false },
+    { video: { facingMode: { ideal: 'environment' } }, audio: false },
+    { video: true, audio: false }
+  ];
+
+  let lastErr = null;
+  for (const constraints of constraintSets) {
+    try {
+      setStatus('Ouverture caméra…');
+      controls = await reader.decodeFromConstraints(constraints, video, (res) => {
+        if (res) onDecoded(res.getText());
+      });
+      setStatus('Scan en cours…', 'ok');
+      stopBtn.disabled = false;
+
+      // Focus continu si supporté
+      try {
+        const track = video.srcObject.getVideoTracks()[0];
+        const caps = track.getCapabilities?.() || {};
+        const advanced = [];
+        if (caps.focusMode?.includes('continuous')) advanced.push({ focusMode: 'continuous' });
+        if (advanced.length) await track.applyConstraints({ advanced });
+      } catch {}
+      return;
+    } catch (e) {
+      lastErr = e;
+      console.warn('Échec contraintes', constraints, e);
+      // Si permission refusée, inutile de retenter avec d'autres contraintes
+      if (e.name === 'NotAllowedError' || e.name === 'SecurityError') break;
+    }
+  }
+
+  setStatus(explainError(lastErr) + ' [' + diagnose() + ']', 'err');
+  startBtn.disabled = false;
 }
 
 function stop() {
